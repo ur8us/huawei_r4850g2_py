@@ -1,6 +1,6 @@
 # huawei_r4850g2_py
 
-This repository contains `huawei_r4850g2_py.py`, a small Python program for reading live telemetry from a Huawei `R4850G2` power supply over CAN bus and, when explicitly requested, writing a limited set of settings.
+This repository contains `huawei_r4850g2_py.py`, a small Python program for reading live telemetry from Huawei `R4850G2` and `R4875G1` power supplies over CAN bus and, when explicitly requested, writing a limited set of settings.
 
 The script polls the PSU using the documented Huawei CAN protocol and prints decoded values such as:
 
@@ -53,7 +53,7 @@ The program supports two ways of talking to the CAN bus:
 - Linux
 - Python 3.10 or newer
 - CAN bus bitrate set to `125000`
-- A Huawei `R4850G2` connected to the CAN bus
+- A Huawei `R4850G2` or `R4875G1` connected to the CAN bus
 - One of:
   - a working SocketCAN interface
   - a CANalyst-II compatible USB adapter
