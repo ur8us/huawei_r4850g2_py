@@ -1,9 +1,10 @@
 # huawei_r4850g2_py
 
-This repository contains `huawei_r4850g2_py.py`, a small Python program for reading live telemetry from Huawei `R4850G2` and `R4875G1` power supplies over CAN bus and, when explicitly requested, writing a limited set of settings.
+This repository contains `huawei_r4850g2_py.py`, a small Python program for reading live telemetry from Huawei `R4850G2`, `R4875G1`, and `R4875G5` power supplies over CAN bus and, when explicitly requested, writing a limited set of settings.
 
 The script polls the PSU using the documented Huawei CAN protocol and prints decoded values such as:
 
+- Detected model (`R4850G2`, `R4875G1`, or `R4875G5`) when the PSU returns E-Label metadata
 - Input voltage
 - Input current
 - Input frequency
@@ -53,7 +54,7 @@ The program supports two ways of talking to the CAN bus:
 - Linux
 - Python 3.10 or newer
 - CAN bus bitrate set to `125000`
-- A Huawei `R4850G2` or `R4875G1` connected to the CAN bus
+- A Huawei `R4850G2`, `R4875G1`, or `R4875G5` connected to the CAN bus
 - One of:
   - a working SocketCAN interface
   - a CANalyst-II compatible USB adapter
@@ -223,11 +224,14 @@ python3 huawei_r4850g2_py.py --backend canalystii --channel 0 --unknown
 ## Example Output
 
 ```text
+Detected model: R4850G2 (nominal max current 50.00 A)
+
 Input:  230.10 V  50.02 Hz  11.40 A  2622.00 W
 Output: 53.40 V  45.80 A of 50.00 A  2445.00 W
 Temps:  in 28.00 C  out 34.00 C
 Limit:  100.00 %  Efficiency: 93.20 %  Ah: 0.512
 State:  enabled
+Model:  R4850G2
 ```
 
 ## Troubleshooting
@@ -263,6 +267,8 @@ sudo udevadm trigger
 ## Notes
 
 - Write support is limited to output on/off and stored default voltage
+- In read mode the script sends a one-shot Huawei D2 E-Label query at startup and uses the returned description text to detect `R4850G2`, `R4875G1`, or `R4875G5` when available
+- When the model is detected, the script prints a one-time startup line with the nominal maximum current for that rectifier type
 - Setting stored voltage also sets the immediate output voltage to the same value
 - The write helper scripts are one-shot commands and do not print the current PSU telemetry state
 - Stored voltage is validated to `48.0` to `58.5` V before transmission

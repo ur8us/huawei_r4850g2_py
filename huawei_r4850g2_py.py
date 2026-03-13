@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read telemetry from a Huawei R4850G2 rectifier over CAN.
+"""Read telemetry from supported Huawei rectifiers over CAN.
 
 Protocol reference:
 https://github.com/craigpeacock/Huawei_R4850G2_CAN
@@ -8,6 +8,7 @@ https://github.com/craigpeacock/Huawei_R4850G2_CAN
 from __future__ import annotations
 
 import argparse
+import re
 import select
 import signal
 import socket
@@ -24,7 +25,9 @@ CAN_FRAME_SIZE = struct.calcsize(CAN_FRAME_FORMAT)
 
 QUERY_ID = 0x108040FE
 DATA_ID = 0x1081407F
+ELABEL_REQUEST_ID = 0x1081D2FE
 DESCRIPTION_ID = 0x1081D27F
+DESCRIPTION_END_ID = 0x1081D27E
 ACK_ID = 0x1081807E
 AMP_HOUR_ID = 0x1001117E
 KEEPALIVE_ID = 0x100011FE
@@ -37,8 +40,13 @@ REGISTER_STORED_VOLTAGE = 0x0101
 REGISTER_STANDBY = 0x0132
 
 ACK_ERROR_FLAG = 0x20
+MODEL_PATTERN = re.compile(r"\bR\d{4}[A-Z]\d\b")
+MODEL_NOMINAL_MAX_CURRENT_A = {
+    "R4850G2": 50.0,
+    "R4875G1": 75.0,
+    "R4875G5": 75.0,
+}
 
-R4850G2_MAX_CURRENT_A = 50.0
 R4850G2_STORED_VOLTAGE_MIN_V = 48.0
 R4850G2_STORED_VOLTAGE_MAX_V = 58.5
 
@@ -73,8 +81,11 @@ class RectifierState:
     efficiency_ratio: float | None = None
     max_output_current_ratio: float | None = None
     output_enabled: bool | None = None
+    model: str | None = None
     description: str = ""
     amp_seconds: float = 0.0
+    startup_info_printed: bool = False
+    e_label_parts: dict[int, str] = field(default_factory=dict)
     unknown_frames: dict[int, bytes] = field(default_factory=dict)
 
     @property
@@ -106,6 +117,10 @@ def unpack_frame(frame: bytes) -> tuple[int, bytes]:
 
 def send_query(sock: socket.socket) -> None:
     sock.send(pack_frame(QUERY_ID, b"\x00" * 8))
+
+
+def send_elabel_request(sock: socket.socket) -> None:
+    sock.send(pack_frame(ELABEL_REQUEST_ID, b"\x00" * 8))
 
 
 def send_frame(sock: socket.socket, can_id: int, data: bytes) -> None:
@@ -142,6 +157,18 @@ def send_query_python_can(bus) -> None:
     bus.send(
         can.Message(
             arbitration_id=QUERY_ID,
+            is_extended_id=True,
+            data=b"\x00" * 8,
+        )
+    )
+
+
+def send_elabel_request_python_can(bus) -> None:
+    import can
+
+    bus.send(
+        can.Message(
+            arbitration_id=ELABEL_REQUEST_ID,
             is_extended_id=True,
             data=b"\x00" * 8,
         )
@@ -296,6 +323,51 @@ def update_amp_hours(state: RectifierState, data: bytes) -> None:
     state.amp_seconds += current_a * 0.377
 
 
+def get_nominal_max_current(model: str | None) -> float | None:
+    if not model:
+        return None
+    return MODEL_NOMINAL_MAX_CURRENT_A.get(model)
+
+
+def update_e_label(state: RectifierState, data: bytes) -> None:
+    if len(data) < 8:
+        return
+
+    part_number = decode_u16_be(data[0:2])
+    state.e_label_parts[part_number] = data[2:8].decode(
+        "ascii",
+        errors="replace",
+    ).rstrip("\x00")
+
+    e_label = "".join(state.e_label_parts[idx] for idx in sorted(state.e_label_parts))
+    description_match = re.search(r"Description=([^\r\n\x00]+)", e_label)
+    if description_match:
+        state.description = description_match.group(1).strip()
+
+    for candidate in (state.description, e_label):
+        if not candidate:
+            continue
+        model_match = MODEL_PATTERN.search(candidate)
+        if model_match:
+            state.model = model_match.group(0)
+            break
+
+
+def maybe_print_startup_info(state: RectifierState) -> None:
+    if state.startup_info_printed or not state.model:
+        return
+
+    nominal_max_current_a = get_nominal_max_current(state.model)
+    if nominal_max_current_a is None:
+        print(f"Detected model: {state.model}")
+    else:
+        print(
+            f"Detected model: {state.model} "
+            f"(nominal max current {nominal_max_current_a:.2f} A)"
+        )
+    state.startup_info_printed = True
+
+
 def handle_frame(
     state: RectifierState,
     can_id: int,
@@ -310,10 +382,9 @@ def handle_frame(
     if can_id == DATA_ID:
         return update_parameter(state, data)
 
-    if can_id == DESCRIPTION_ID and len(data) >= 8:
-        text = data[2:8].decode("ascii", errors="replace").strip("\x00 ")
-        if text:
-            state.description += text
+    if can_id in {DESCRIPTION_ID, DESCRIPTION_END_ID}:
+        # The D2 E-Label reply arrives as many numbered 6-byte ASCII chunks.
+        update_e_label(state, data)
         return False
 
     if can_id == AMP_HOUR_ID:
@@ -348,7 +419,9 @@ def format_value(value: float | None, unit: str, *, scale: float = 1.0) -> str:
 def print_summary(state: RectifierState) -> None:
     max_current_a = None
     if state.max_output_current_ratio is not None:
-        max_current_a = state.max_output_current_ratio * R4850G2_MAX_CURRENT_A
+        nominal_max_current_a = get_nominal_max_current(state.model)
+        if nominal_max_current_a is not None:
+            max_current_a = state.max_output_current_ratio * nominal_max_current_a
 
     enabled = "n/a"
     if state.output_enabled is True:
@@ -372,6 +445,8 @@ def print_summary(state: RectifierState) -> None:
         f"Ah: {state.amp_hours:.3f}",
         f"State:  {enabled}",
     ]
+    if state.model:
+        lines.append(f"Model:  {state.model}")
     if state.description:
         lines.append(f"Desc:   {state.description}")
     print("\n".join(lines))
@@ -437,7 +512,10 @@ def wait_for_python_can_frames(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Read Huawei R4850G2 telemetry and optionally write selected settings."
+        description=(
+            "Read Huawei R4850G2/R4875G1/R4875G5 telemetry and optionally write "
+            "selected settings."
+        )
     )
     parser.add_argument(
         "target",
@@ -562,6 +640,7 @@ def main() -> int:
                     print_unknown_frames(state)
                 return 0
 
+            send_elabel_request(sock)
             while running:
                 now = time.monotonic()
                 if now >= next_query:
@@ -583,6 +662,7 @@ def main() -> int:
                 can_id, data = unpack_frame(frame)
                 if handle_frame(state, can_id, data, args.raw, args.unknown):
                     print_summary(state)
+                maybe_print_startup_info(state)
         finally:
             sock.close()
     else:
@@ -626,6 +706,7 @@ def main() -> int:
                     print_unknown_frames(state)
                 return 0
 
+            send_elabel_request_python_can(bus)
             while running:
                 now = time.monotonic()
                 if now >= next_query:
@@ -651,6 +732,7 @@ def main() -> int:
                     args.unknown,
                 ):
                     print_summary(state)
+                maybe_print_startup_info(state)
         finally:
             close_python_can_bus(bus)
 
